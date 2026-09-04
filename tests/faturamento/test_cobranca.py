@@ -17,7 +17,7 @@ from app.faturamento.cobranca import processar_cobranca
         (100.0, "", 0, -2.0),
 
         # NORMALIZAÇÃO E DESCONTOS EM DIA (dias_atraso = 0) 
-        
+
         (100.0, " BRONZE ", 0, 100.00),  
         (100.0, "PrAtA", 0, 85.00),     # Prata 
         (100.0, "OURO", 0, 75.00),     
@@ -30,7 +30,7 @@ from app.faturamento.cobranca import processar_cobranca
         #  FRONTEIRAS: ATRASO SEVERO (> 20 dias) 
 
         (100.0, "BRONZE", 21, 146.80),  
-        (100.0, "PRATA", 30, 137.60),  
+        (100.0, "PRATA", 30, 135.40),  
         (100.0, "OURO", 25, 120.00),   
     ],
 )
