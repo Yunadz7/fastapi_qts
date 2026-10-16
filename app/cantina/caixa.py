@@ -1,4 +1,4 @@
-from app.cantina.caixa import calcular_desconto_combo
+from app.cantina.combo import calcular_desconto_combo
 from app.cantina.embalagem import calcular_taxa_embalagem
 
 def processar_venda(
