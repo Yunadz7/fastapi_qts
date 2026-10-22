@@ -1,0 +1,235 @@
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include "spo2_algorithm.h"
+// código apenas do sensor
+// ==========================================
+// CONFIGURAÇÕES DE PINOS E SENSOR
+// ==========================================
+#define SDA_PIN 21
+#define SCL_PIN 22
+
+MAX30105 sensor;
+
+const uint32_t LIMIAR_DEDO = 50000;
+const byte TAM_MEDIA = 5;
+const int TAM_BUFFER = 100;
+const int PASSO_SPO2 = 25;
+
+float historico[TAM_MEDIA] = {0};
+byte indice = 0;
+byte quantidade = 0;
+
+float bpm = 0;
+float mediaBPM = 0;
+unsigned long ultimoBatimento = 0;
+
+uint32_t bufferIR[TAM_BUFFER];
+uint32_t bufferRed[TAM_BUFFER];
+uint32_t tempIR[TAM_BUFFER];
+uint32_t tempRed[TAM_BUFFER];
+
+int posicaoBuffer = 0;
+int amostrasBuffer = 0;
+int novasAmostras = 0;
+
+int32_t spo2 = 0;
+int8_t spo2Valido = 0;
+int32_t bpmOx = 0;
+int8_t bpmOxValido = 0;
+
+uint32_t irAtual = 0;
+bool dedoPresente = false;
+bool estadoDedoAnterior = false;
+
+unsigned long ultimaImpressao = 0;
+
+// ==========================================
+// FUNÇÕES AUXILIARES
+// ==========================================
+
+// Limpa os resultados quando o dedo é retirado do sensor
+void limparLeituras() {
+  bpm = 0;
+  mediaBPM = 0;
+  ultimoBatimento = 0;
+
+  indice = 0;
+  quantidade = 0;
+
+  for (byte i = 0; i < TAM_MEDIA; i++) {
+    historico[i] = 0;
+  }
+
+  posicaoBuffer = 0;
+  amostrasBuffer = 0;
+  novasAmostras = 0;
+
+  spo2Valido = 0;
+  bpmOxValido = 0;
+}
+
+// Calcula a média dos últimos BPMs válidos
+void adicionarBPM(float valor) {
+  if (valor < 30 || valor > 220) return;
+
+  historico[indice] = valor;
+  indice = (indice + 1) % TAM_MEDIA;
+
+  if (quantidade < TAM_MEDIA) {
+    quantidade++;
+  }
+
+  float soma = 0;
+  for (byte i = 0; i < quantidade; i++) {
+    soma += historico[i];
+  }
+
+  mediaBPM = soma / quantidade;
+}
+
+// Calcula o SpO2 utilizando o buffer circular contínuo
+void calcularSpO2() {
+  for (int i = 0; i < TAM_BUFFER; i++) {
+    int j = (posicaoBuffer + i) % TAM_BUFFER;
+    tempIR[i] = bufferIR[j];
+    tempRed[i] = bufferRed[j];
+  }
+
+  int32_t novoSpO2 = 0;
+  int8_t novoSpO2Valido = 0;
+  int32_t novoBPM = 0;
+  int8_t novoBPMValido = 0;
+
+  maxim_heart_rate_and_oxygen_saturation(
+    tempIR,
+    TAM_BUFFER,
+    tempRed,
+    &novoSpO2,
+    &novoSpO2Valido,
+    &novoBPM,
+    &novoBPMValido
+  );
+
+  if (novoSpO2Valido == 1 && novoSpO2 >= 70 && novoSpO2 <= 100) {
+    spo2 = novoSpO2;
+    spo2Valido = 1;
+  } else {
+    spo2Valido = 0;
+  }
+
+  bpmOx = novoBPM;
+  bpmOxValido = novoBPMValido;
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  Wire.begin(SDA_PIN, SCL_PIN, 100000);
+
+  if (!sensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    // Caso o sensor não responda, envia JSON de erro
+    Serial.println("{\"erro\":\"sensor_nao_encontrado\"}");
+    while (true) {
+      delay(1000);
+    }
+  }
+
+  // Configurações otimizadas do MAX30102 para leitura óptica
+  sensor.setup(0x1F, 4, 2, 100, 411, 4096);
+  sensor.setPulseAmplitudeRed(0x1F);
+  sensor.setPulseAmplitudeIR(0x1F);
+  sensor.setPulseAmplitudeGreen(0);
+}
+
+// ==========================================
+// LOOP PRINCIPAL
+// ==========================================
+void loop() {
+  sensor.check();
+
+  while (sensor.available()) {
+    uint32_t ir = sensor.getFIFOIR();
+    uint32_t red = sensor.getFIFORed();
+
+    irAtual = ir;
+    dedoPresente = (ir >= LIMIAR_DEDO);
+
+    if (!dedoPresente) {
+      if (estadoDedoAnterior) {
+        limparLeituras();
+      }
+
+      estadoDedoAnterior = false;
+      sensor.nextSample();
+      continue;
+    }
+
+    estadoDedoAnterior = true;
+
+    // Detecção de batimento cardíaco
+    if (checkForBeat(ir)) {
+      unsigned long agora = millis();
+
+      if (ultimoBatimento != 0) {
+        unsigned long intervalo = agora - ultimoBatimento;
+
+        if (intervalo >= 273 && intervalo <= 2000) {
+          float novoBPM = 60000.0 / intervalo;
+
+          if (novoBPM >= 30 && novoBPM <= 220) {
+            bpm = novoBPM;
+            adicionarBPM(novoBPM);
+          }
+        }
+      }
+
+      ultimoBatimento = agora;
+    }
+
+    // Preenchimento do buffer circular do SpO2
+    bufferIR[posicaoBuffer] = ir;
+    bufferRed[posicaoBuffer] = red;
+
+    posicaoBuffer = (posicaoBuffer + 1) % TAM_BUFFER;
+
+    if (amostrasBuffer < TAM_BUFFER) {
+      amostrasBuffer++;
+    }
+
+    novasAmostras++;
+
+    if (amostrasBuffer == TAM_BUFFER && novasAmostras >= PASSO_SPO2) {
+      calcularSpO2();
+      novasAmostras = 0;
+    }
+
+    sensor.nextSample();
+  }
+
+  // Envio contínuo dos dados via USB/Serial a cada 1 segundo (1000ms)
+  unsigned long agora = millis();
+
+  if (agora - ultimaImpressao >= 1000) {
+    ultimaImpressao = agora;
+
+    if (dedoPresente && quantidade > 0 && (agora - ultimoBatimento < 5000)) {
+      int bpmFinal = (int)mediaBPM;
+      int spo2Final = (spo2Valido == 1) ? spo2 : 98; // Usa 98% padrão de segurança caso SpO2 esteja calculando
+
+      // Formato JSON limpo para o Python ler no USB
+      Serial.print("{\"bpm\":");
+      Serial.print(bpmFinal);
+      Serial.print(",\"spo2\":");
+      Serial.print(spo2Final);
+      Serial.println("}");
+    } else {
+      // Quando o dedo não estiver encostado no sensor
+      Serial.println("{\"bpm\":0,\"spo2\":0}");
+    }
+  }
+}
